@@ -1,0 +1,14 @@
+# JetBrains IDE settings
+.idea/
+
+# Virtual environment
+.venv/
+
+# Python cache / compiled files
+__pycache__/
+*.py[cod]
+
+# macOS / Windows thumbnail files (optional safety)
+.DS_Store
+Thumbs.db
+/.idea/

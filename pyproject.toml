@@ -9,6 +9,6 @@ dependencies = []
 Repository = "https://github.com/xmarre/TorchCompileModel_LoRASafe"
 
 [tool.comfy]
-PublisherId = "TorchCompileModel_LoRASafe"
+PublisherId = "xmarre"
 DisplayName = "LoRA‐Safe TorchCompile"
 Icon        = "https://raw.githubusercontent.com/xmarre/TorchCompileModel_LoRASafe/main/icon.png"

@@ -11,4 +11,4 @@ Repository = "https://github.com/xmarre/TorchCompileModel_LoRASafe"
 [tool.comfy]
 PublisherId = "xmarre"
 DisplayName = "LoRA‐Safe TorchCompile"
-Icon        = "https://raw.githubusercontent.com/xmarre/TorchCompileModel_LoRASafe/main/icon.png"
+Icon        = ""

@@ -1,0 +1,15 @@
+[project]
+name = "torchcompilemodel_lorasafe"
+description = "Drop-in TorchCompile node that preserves LoRA patches."
+version = "1.0.0"
+license = {file = "LICENSE"}
+
+[project.urls]
+Repository = "https://github.com/xmarre/TorchCompileModel_LoRASafe"
+#  Used by Comfy Registry https://registry.comfy.org
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "TorchCompileModel_LoRASafe"
+Icon = ""
+includes = []

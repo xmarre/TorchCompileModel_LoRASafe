@@ -1,0 +1,14 @@
+[project]
+name        = "TorchCompileModel_LoRASafe"
+description = "LoRA‐Safe TorchCompile node for ComfyUI"
+version     = "0.1.0"
+license     = { file = "LICENSE" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/xmarre/TorchCompileModel_LoRASafe"
+
+[tool.comfy]
+PublisherId = "TorchCompileModel_LoRASafe"
+DisplayName = "LoRA‐Safe TorchCompile"
+Icon        = "https://raw.githubusercontent.com/xmarre/TorchCompileModel_LoRASafe/main/icon.png"

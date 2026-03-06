@@ -63,18 +63,32 @@ Strict Flux names targeted by default:
 - `single_blocks.{i}.linear1`
 - `single_blocks.{i}.linear2`
 
+For cudagraph-capable Flux runs (`backend = cudagraphs`, or `backend = inductor`
+with `disable_cudagraphs = false`), the target set is narrowed to the
+cudagraph-safe qkv subset only:
+
+- `double_blocks.{i}.img_attn.qkv`
+- `double_blocks.{i}.txt_attn.qkv`
+
+In that mode, inferred Flux targets and full-model fallback are intentionally
+disabled to avoid widening back into unstable replay paths.
+
 Optional widening controls:
 
 - `allow_flux_inferred_targets` (`false` by default)
   - `false`: use only strict names above.
   - `true`: allow inferred Flux leaf targets (including `img_mlp/txt_mlp`
     pattern matches) for compatibility across variants.
+  - Ignored for cudagraph-capable Flux runs, which stay on the strict qkv-only
+    set.
 
 - `fallback_to_full_model_if_no_targets` (`false` by default)
   - `false`: if transformer-only target discovery finds nothing, skip compile
     instead of silently widening scope.
   - `true`: if discovery finds nothing, fall back to compiling
     `diffusion_model`.
+  - Ignored for cudagraph-capable Flux runs, which skip compile instead of
+    widening scope.
 
 For non-Flux transformer-style models, it compiles known block containers such
 as:
@@ -128,23 +142,30 @@ If no known transformer compile targets are found, behavior is controlled by
   - Not applied to the `cudagraphs` backend.
   - Recommended if you hit `cudaMallocAsync` / cudagraph instability in
     Inductor-based runs.
+  - Set to `false` only when you specifically want Inductor cudagraphs.
 
 - `compile_transformer_only` (`BOOLEAN`)
   - `false` (default): compile the entire `diffusion_model`.
   - `true`: compile discovered transformer targets only.
   - Flux behavior (default strict mode): targets only `qkv/proj` attention
     leaves plus `linear1/linear2` leaves.
+  - For cudagraph-capable Flux runs, discovery is narrowed further to
+    `img_attn.qkv` and `txt_attn.qkv` only.
 
 - `allow_flux_inferred_targets` (`BOOLEAN`, default `false`)
   - `false` (recommended): strict Flux target set only.
   - `true`: allow inferred Flux leaf targets (`img_mlp/txt_mlp`-style matches)
     when preferred names differ.
+  - Ignored for cudagraph-capable Flux runs, which stay on the strict qkv-only
+    set.
 
 - `fallback_to_full_model_if_no_targets` (`BOOLEAN`, default `false`)
   - `false` (recommended): if transformer-only discovery finds nothing, skip
     compile rather than widening scope.
   - `true`: if transformer-only discovery finds nothing, compile
     `diffusion_model`.
+  - Ignored for cudagraph-capable Flux runs, which skip compile instead of
+    widening scope.
 
 ---
 
@@ -153,7 +174,8 @@ If no known transformer compile targets are found, behavior is controlled by
 If you're unsure where to begin:
 
 - Backend: `inductor`
-- `disable_cudagraphs`: `true` (recommended default for stability)
+- `disable_cudagraphs`: `true` (recommended default for stability). Set to
+  `false` only when you specifically want Inductor cudagraphs.
 - Mode: `default`
 - `fullgraph`: `false`
 - `dynamic`: `false`
@@ -176,6 +198,8 @@ Then iterate one setting at a time based on stability and speed.
 - If a backend fails, switch to `inductor` first.
 - If you encounter `cudaMallocAsync`/cudagraph issues, keep
   `disable_cudagraphs = true`.
+- For cudagraph-enabled Flux validation, start with qkv-only targeting and do
+  not widen to `proj` unless logs prove the path is stable.
 
 - Guard filtering: when ComfyUI's `skip_torch_compile_dict` is available, this
   node passes it as `options['guard_filter_fn']` to reduce guard churn on

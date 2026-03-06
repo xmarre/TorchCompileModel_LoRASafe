@@ -7,6 +7,11 @@ import torch.nn as nn
 
 _LOG = logging.getLogger(__name__)
 
+_DEFAULT_FORCE_PARAMETER_STATIC_SHAPES = getattr(
+    torch._dynamo.config, "force_parameter_static_shapes", None
+)
+_DEFAULT_GRAPH_PARTITION = getattr(torch._inductor.config, "graph_partition", None)
+
 try:
     from comfy_api.torch_helpers import set_torch_compile_wrapper as _set_torch_compile_wrapper
 except Exception:
@@ -93,8 +98,10 @@ class TorchCompileModel_LoRASafe:
         "img_attn.proj",
         "txt_attn.qkv",
         "txt_attn.proj",
-        "img_mlp",
-        "txt_mlp",
+    )
+    _FLUX_DOUBLE_CUDAGRAPH_SAFE_SUFFIXES = (
+        "img_attn.qkv",
+        "txt_attn.qkv",
     )
 
     _FLUX_SINGLE_PREFERRED_SUFFIXES = ("linear1", "linear2")
@@ -191,6 +198,12 @@ class TorchCompileModel_LoRASafe:
             return False
         return any(True for _ in module.parameters(recurse=False))
 
+    @staticmethod
+    def _is_flux_model(diffusion_model: nn.Module) -> bool:
+        return hasattr(diffusion_model, "double_blocks") and hasattr(
+            diffusion_model, "single_blocks"
+        )
+
     @classmethod
     def _try_preferred_suffixes(cls, block: nn.Module, suffixes):
         targets = []
@@ -208,9 +221,17 @@ class TorchCompileModel_LoRASafe:
 
     @classmethod
     def _discover_flux_double_block_suffixes(
-        cls, block: nn.Module, allow_inferred_targets: bool = False
+        cls,
+        block: nn.Module,
+        allow_inferred_targets: bool = False,
+        cudagraph_capable: bool = False,
     ):
-        preferred = cls._try_preferred_suffixes(block, cls._FLUX_DOUBLE_PREFERRED_SUFFIXES)
+        preferred_suffixes = (
+            cls._FLUX_DOUBLE_CUDAGRAPH_SAFE_SUFFIXES
+            if cudagraph_capable
+            else cls._FLUX_DOUBLE_PREFERRED_SUFFIXES
+        )
+        preferred = cls._try_preferred_suffixes(block, preferred_suffixes)
         if preferred or not allow_inferred_targets:
             return preferred
 
@@ -231,8 +252,14 @@ class TorchCompileModel_LoRASafe:
 
     @classmethod
     def _discover_flux_single_block_suffixes(
-        cls, block: nn.Module, allow_inferred_targets: bool = False
+        cls,
+        block: nn.Module,
+        allow_inferred_targets: bool = False,
+        cudagraph_capable: bool = False,
     ):
+        if cudagraph_capable:
+            return []
+
         preferred = cls._try_preferred_suffixes(block, cls._FLUX_SINGLE_PREFERRED_SUFFIXES)
         if preferred or not allow_inferred_targets:
             return preferred
@@ -247,25 +274,34 @@ class TorchCompileModel_LoRASafe:
         return list(dict.fromkeys(inferred))
 
     @classmethod
-    def _discover_compile_keys(cls, diffusion_model, allow_flux_inferred_targets: bool = False):
+    def _discover_compile_keys(
+        cls,
+        diffusion_model,
+        allow_flux_inferred_targets: bool = False,
+        cudagraph_capable: bool = False,
+    ):
         keys = []
 
         # Flux special-case: compile only leaf tensor-heavy modules, not full block forward.
-        if hasattr(diffusion_model, "double_blocks") and hasattr(diffusion_model, "single_blocks"):
+        if cls._is_flux_model(diffusion_model):
             double_blocks = getattr(diffusion_model, "double_blocks")
             single_blocks = getattr(diffusion_model, "single_blocks")
 
             if isinstance(double_blocks, (nn.ModuleList, list, tuple)):
                 for i, block in enumerate(double_blocks):
                     for suffix in cls._discover_flux_double_block_suffixes(
-                        block, allow_inferred_targets=allow_flux_inferred_targets
+                        block,
+                        allow_inferred_targets=allow_flux_inferred_targets,
+                        cudagraph_capable=cudagraph_capable,
                     ):
                         keys.append(f"diffusion_model.double_blocks.{i}.{suffix}")
 
             if isinstance(single_blocks, (nn.ModuleList, list, tuple)):
                 for i, block in enumerate(single_blocks):
                     for suffix in cls._discover_flux_single_block_suffixes(
-                        block, allow_inferred_targets=allow_flux_inferred_targets
+                        block,
+                        allow_inferred_targets=allow_flux_inferred_targets,
+                        cudagraph_capable=cudagraph_capable,
                     ):
                         keys.append(f"diffusion_model.single_blocks.{i}.{suffix}")
 
@@ -345,6 +381,19 @@ class TorchCompileModel_LoRASafe:
 
         self._configure_torch_logs(debug_torch_logs)
 
+        cudagraph_capable = backend == "cudagraphs" or (
+            backend == "inductor" and not disable_cudagraphs
+        )
+
+        if _DEFAULT_FORCE_PARAMETER_STATIC_SHAPES is not None:
+            torch._dynamo.config.force_parameter_static_shapes = (
+                False if cudagraph_capable else _DEFAULT_FORCE_PARAMETER_STATIC_SHAPES
+            )
+        if _DEFAULT_GRAPH_PARTITION is not None:
+            torch._inductor.config.graph_partition = (
+                True if cudagraph_capable else _DEFAULT_GRAPH_PARTITION
+            )
+
         # This flag is process-global, so set it on every call to match the
         # current node input instead of leaking state from earlier runs.
         if backend in ("inductor", "cudagraphs"):
@@ -363,24 +412,41 @@ class TorchCompileModel_LoRASafe:
         )
 
         if compile_transformer_only:
+            is_flux_model = self._is_flux_model(dm)
             compile_keys = self._discover_compile_keys(
-                dm, allow_flux_inferred_targets=allow_flux_inferred_targets
+                dm,
+                allow_flux_inferred_targets=(
+                    allow_flux_inferred_targets and not cudagraph_capable
+                ),
+                cudagraph_capable=cudagraph_capable,
             )
             if not compile_keys:
-                if fallback_to_full_model_if_no_targets:
+                if fallback_to_full_model_if_no_targets and not (
+                    cudagraph_capable and is_flux_model
+                ):
                     _LOG.warning(
                         "TorchCompileModel_LoRASafe: no known transformer compile targets found; "
                         "falling back to whole diffusion model compile."
                     )
                     compile_keys = ["diffusion_model"]
                 else:
-                    _LOG.warning(
-                        "TorchCompileModel_LoRASafe: no known transformer compile targets found; "
-                        "skipping compile instead of falling back to whole model."
-                    )
+                    if cudagraph_capable and is_flux_model:
+                        _LOG.warning(
+                            "TorchCompileModel_LoRASafe: no cudagraph-safe Flux transformer "
+                            "compile targets found; skipping compile instead of widening target scope."
+                        )
+                    else:
+                        _LOG.warning(
+                            "TorchCompileModel_LoRASafe: no known transformer compile targets found; "
+                            "skipping compile instead of falling back to whole model."
+                        )
                     return (m,)
         else:
             compile_keys = ["diffusion_model"]
+
+        if cudagraph_capable and compile_transformer_only and is_flux_model:
+            _LOG.warning("Flux cudagraph targets: %s", compile_keys[:16])
+            _LOG.warning("Flux cudagraph target count: %d", len(compile_keys))
 
         if _set_torch_compile_wrapper is not None:
             try:
@@ -407,3 +473,6 @@ class TorchCompileModel_LoRASafe:
 NODE_CLASS_MAPPINGS = {
     "TorchCompileModel_LoRASafe": TorchCompileModel_LoRASafe,
 }
+
+
+

@@ -1,7 +1,8 @@
 import logging
+import threading
+
 import torch
 import torch.nn as nn
-import threading
 
 _LOG = logging.getLogger(__name__)
 
@@ -9,6 +10,11 @@ try:
     from comfy_api.torch_helpers import set_torch_compile_wrapper as _set_torch_compile_wrapper
 except Exception:
     _set_torch_compile_wrapper = None
+
+try:
+    from comfy_extras.nodes_torch_compile import skip_torch_compile_dict as _skip_torch_compile_dict
+except Exception:
+    _skip_torch_compile_dict = None
 
 
 class _LazyCompiled(nn.Module):
@@ -73,15 +79,24 @@ class _LazyCompiled(nn.Module):
 class TorchCompileModel_LoRASafe:
     """LoRA-safe torch.compile that also works with Flux block layouts."""
 
-    _BLOCK_LAYER_TYPES = (
-        "double_blocks",
-        "single_blocks",
+    _GENERIC_BLOCK_LAYER_TYPES = (
         "layers",
         "transformer_blocks",
         "blocks",
         "visual_transformer_blocks",
         "text_transformer_blocks",
     )
+
+    _FLUX_DOUBLE_PREFERRED_SUFFIXES = (
+        "img_attn.qkv",
+        "img_attn.proj",
+        "txt_attn.qkv",
+        "txt_attn.proj",
+        "img_mlp",
+        "txt_mlp",
+    )
+
+    _FLUX_SINGLE_PREFERRED_SUFFIXES = ("linear1", "linear2")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -92,13 +107,22 @@ class TorchCompileModel_LoRASafe:
                 "mode": (["default", "reduce-overhead", "max-autotune"],),
                 "fullgraph": ("BOOLEAN", {"default": False}),
                 "dynamic": ("BOOLEAN", {"default": False}),
+                "disable_cudagraphs": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "True -> pass torch.compile options {'triton.cudagraphs': False} "
+                        "for inductor backend. Useful to avoid cudaMallocAsync/cudagraph issues "
+                        "in some environments.",
+                    },
+                ),
                 "compile_transformer_only": (
                     "BOOLEAN",
                     {
                         "default": False,
-                        "tooltip": "True -> compile known transformer block lists only. "
-                        "Flux models use double_blocks/single_blocks; "
-                        "SD-style models often use transformer_blocks/blocks.",
+                        "tooltip": "True -> compile discovered transformer targets only. "
+                        "Flux models compile leaf submodules inside double_blocks/single_blocks; "
+                        "SD-style models often compile transformer_blocks/blocks.",
                     },
                 ),
             }
@@ -124,10 +148,88 @@ class TorchCompileModel_LoRASafe:
                     f"(yours is {cap[0]}.{cap[1]})."
                 )
 
+    @staticmethod
+    def _is_leaf_compile_module(module: nn.Module) -> bool:
+        if not isinstance(module, nn.Module):
+            return False
+        if any(True for _ in module.children()):
+            return False
+        return any(True for _ in module.parameters(recurse=False))
+
+    @classmethod
+    def _try_preferred_suffixes(cls, block: nn.Module, suffixes):
+        targets = []
+        for suffix in suffixes:
+            obj = block
+            ok = True
+            for part in suffix.split("."):
+                if not hasattr(obj, part):
+                    ok = False
+                    break
+                obj = getattr(obj, part)
+            if ok and cls._is_leaf_compile_module(obj):
+                targets.append(suffix)
+        return targets
+
+    @classmethod
+    def _discover_flux_double_block_suffixes(cls, block: nn.Module):
+        preferred = cls._try_preferred_suffixes(block, cls._FLUX_DOUBLE_PREFERRED_SUFFIXES)
+        if preferred:
+            return preferred
+
+        inferred = []
+        for name, module in block.named_modules():
+            if not name or not cls._is_leaf_compile_module(module):
+                continue
+            lname = name.lower()
+            parts = lname.split(".")
+            tail = parts[-1]
+            if (
+                (("img_attn" in lname or "txt_attn" in lname) and tail in {"qkv", "proj"})
+                or ("img_mlp" in lname)
+                or ("txt_mlp" in lname)
+            ):
+                inferred.append(name)
+        return list(dict.fromkeys(inferred))
+
+    @classmethod
+    def _discover_flux_single_block_suffixes(cls, block: nn.Module):
+        preferred = cls._try_preferred_suffixes(block, cls._FLUX_SINGLE_PREFERRED_SUFFIXES)
+        if preferred:
+            return preferred
+
+        inferred = []
+        for name, module in block.named_modules():
+            if not name or not cls._is_leaf_compile_module(module):
+                continue
+            lname = name.lower()
+            if lname.endswith("linear1") or lname.endswith("linear2"):
+                inferred.append(name)
+        return list(dict.fromkeys(inferred))
+
     @classmethod
     def _discover_compile_keys(cls, diffusion_model):
         keys = []
-        for layer_name in cls._BLOCK_LAYER_TYPES:
+
+        # Flux special-case: compile only leaf tensor-heavy modules, not full block forward.
+        if hasattr(diffusion_model, "double_blocks") and hasattr(diffusion_model, "single_blocks"):
+            double_blocks = getattr(diffusion_model, "double_blocks")
+            single_blocks = getattr(diffusion_model, "single_blocks")
+
+            if isinstance(double_blocks, (nn.ModuleList, list, tuple)):
+                for i, block in enumerate(double_blocks):
+                    for suffix in cls._discover_flux_double_block_suffixes(block):
+                        keys.append(f"diffusion_model.double_blocks.{i}.{suffix}")
+
+            if isinstance(single_blocks, (nn.ModuleList, list, tuple)):
+                for i, block in enumerate(single_blocks):
+                    for suffix in cls._discover_flux_single_block_suffixes(block):
+                        keys.append(f"diffusion_model.single_blocks.{i}.{suffix}")
+
+            if keys:
+                return list(dict.fromkeys(keys))
+
+        for layer_name in cls._GENERIC_BLOCK_LAYER_TYPES:
             if hasattr(diffusion_model, layer_name):
                 blocks = getattr(diffusion_model, layer_name)
                 if not isinstance(blocks, (nn.ModuleList, list, tuple)):
@@ -137,7 +239,7 @@ class TorchCompileModel_LoRASafe:
         return list(dict.fromkeys(keys))
 
     @staticmethod
-    def _build_compile_kwargs(backend, mode, fullgraph, dynamic):
+    def _build_compile_kwargs(backend, mode, fullgraph, dynamic, disable_cudagraphs):
         compile_kw = dict(
             backend=backend,
             fullgraph=fullgraph,
@@ -145,21 +247,44 @@ class TorchCompileModel_LoRASafe:
         )
         if mode != "default":
             compile_kw["mode"] = mode
+
+        options = {}
+        if _skip_torch_compile_dict is not None:
+            options["guard_filter_fn"] = _skip_torch_compile_dict
+        if disable_cudagraphs and backend == "inductor":
+            options["triton.cudagraphs"] = False
+        if options:
+            compile_kw["options"] = options
+
         return compile_kw
 
-    def patch(self, model, backend, mode, fullgraph, dynamic, compile_transformer_only):
+    def patch(
+        self,
+        model,
+        backend,
+        mode,
+        fullgraph,
+        dynamic,
+        disable_cudagraphs,
+        compile_transformer_only,
+    ):
         self._check_backend(backend)
 
-        m = model.clone()
+        try:
+            m = model.clone(disable_dynamic=True)
+        except TypeError:
+            m = model.clone()
         dm = m.get_model_object("diffusion_model")
 
-        compile_kw = self._build_compile_kwargs(backend, mode, fullgraph, dynamic)
+        compile_kw = self._build_compile_kwargs(
+            backend, mode, fullgraph, dynamic, disable_cudagraphs
+        )
 
         if compile_transformer_only:
             compile_keys = self._discover_compile_keys(dm)
             if not compile_keys:
                 _LOG.warning(
-                    "TorchCompileModel_LoRASafe: no known transformer block lists found; "
+                    "TorchCompileModel_LoRASafe: no known transformer compile targets found; "
                     "falling back to whole diffusion model compile."
                 )
                 compile_keys = ["diffusion_model"]

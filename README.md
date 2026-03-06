@@ -64,14 +64,24 @@ Strict Flux names targeted by default:
 - `single_blocks.{i}.linear2`
 
 For cudagraph-capable Flux runs (`backend = cudagraphs`, or `backend = inductor`
-with `disable_cudagraphs = false`), the target set is narrowed to the
-cudagraph-safe qkv subset only:
+with `disable_cudagraphs = false`), the behavior splits into two safe modes:
 
-- `double_blocks.{i}.img_attn.qkv`
-- `double_blocks.{i}.txt_attn.qkv`
+- `compile_transformer_only = true`
+  - target set is narrowed to the cudagraph-safe qkv subset only:
+    - `double_blocks.{i}.img_attn.qkv`
+    - `double_blocks.{i}.txt_attn.qkv`
+- `compile_transformer_only = false`
+  - the node does **not** compile the outer `diffusion_model` wrapper path.
+  - instead, it widens to a **Flux full-leaf compile** across the model's
+    parameterized leaf modules.
 
-In that mode, inferred Flux targets and full-model fallback are intentionally
-disabled to avoid widening back into unstable replay paths.
+This avoids full-model cudagraph capture through Flux / ComfyUI
+`WrapperExecutor` paths, which are prone to graph-break / replay failures when
+runtime patches such as Sage attention are active.
+
+In cudagraph-capable Flux mode, inferred Flux targets and full-model fallback
+are intentionally disabled to avoid widening back into unstable outer-wrapper
+paths.
 
 Optional widening controls:
 
@@ -145,12 +155,15 @@ If no known transformer compile targets are found, behavior is controlled by
   - Set to `false` only when you specifically want Inductor cudagraphs.
 
 - `compile_transformer_only` (`BOOLEAN`)
-  - `false` (default): compile the entire `diffusion_model`.
+  - `false` (default): compile the entire `diffusion_model` for non-Flux
+    models.
   - `true`: compile discovered transformer targets only.
   - Flux behavior (default strict mode): targets only `qkv/proj` attention
     leaves plus `linear1/linear2` leaves.
-  - For cudagraph-capable Flux runs, discovery is narrowed further to
-    `img_attn.qkv` and `txt_attn.qkv` only.
+  - For cudagraph-capable Flux runs:
+    - `true` -> narrowed further to `img_attn.qkv` and `txt_attn.qkv` only.
+    - `false` -> widens to a Flux **full-leaf compile** instead of compiling
+      the outer `diffusion_model` wrapper path.
 
 - `allow_flux_inferred_targets` (`BOOLEAN`, default `false`)
   - `false` (recommended): strict Flux target set only.

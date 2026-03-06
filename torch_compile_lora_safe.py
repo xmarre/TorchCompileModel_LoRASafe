@@ -198,6 +198,15 @@ class TorchCompileModel_LoRASafe:
             return False
         return any(True for _ in module.parameters(recurse=False))
 
+    @classmethod
+    def _discover_flux_all_leaf_keys(cls, diffusion_model: nn.Module):
+        keys = []
+        for name, module in diffusion_model.named_modules():
+            if not name or not cls._is_leaf_compile_module(module):
+                continue
+            keys.append(f"diffusion_model.{name}")
+        return list(dict.fromkeys(keys))
+
     @staticmethod
     def _is_flux_model(diffusion_model: nn.Module) -> bool:
         return hasattr(diffusion_model, "double_blocks") and hasattr(
@@ -411,8 +420,9 @@ class TorchCompileModel_LoRASafe:
             backend, mode, fullgraph, dynamic, disable_cudagraphs
         )
 
+        is_flux_model = self._is_flux_model(dm)
+
         if compile_transformer_only:
-            is_flux_model = self._is_flux_model(dm)
             compile_keys = self._discover_compile_keys(
                 dm,
                 allow_flux_inferred_targets=(
@@ -441,12 +451,31 @@ class TorchCompileModel_LoRASafe:
                             "skipping compile instead of falling back to whole model."
                         )
                     return (m,)
+        elif cudagraph_capable and is_flux_model:
+            compile_keys = self._discover_flux_all_leaf_keys(dm)
+            if not compile_keys:
+                _LOG.warning(
+                    "TorchCompileModel_LoRASafe: Flux full-leaf cudagraph compile requested, "
+                    "but no leaf targets were found; skipping compile instead of compiling the "
+                    "whole WrapperExecutor-driven diffusion_model path."
+                )
+                return (m,)
+            _LOG.warning(
+                "TorchCompileModel_LoRASafe: Flux whole-model cudagraph compile requested; "
+                "using wide leaf-module compile instead to avoid WrapperExecutor / "
+                "torch.compiler.disable replay failures."
+            )
         else:
             compile_keys = ["diffusion_model"]
 
-        if cudagraph_capable and compile_transformer_only and is_flux_model:
-            _LOG.warning("Flux cudagraph targets: %s", compile_keys[:16])
-            _LOG.warning("Flux cudagraph target count: %d", len(compile_keys))
+        if cudagraph_capable and is_flux_model:
+            label = (
+                "Flux cudagraph transformer targets"
+                if compile_transformer_only
+                else "Flux cudagraph wide-leaf targets"
+            )
+            _LOG.warning("%s: %s", label, compile_keys[:16])
+            _LOG.warning("%s count: %d", label, len(compile_keys))
 
         if _set_torch_compile_wrapper is not None:
             try:

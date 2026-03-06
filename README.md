@@ -51,29 +51,30 @@ For Flux-style models in ComfyUI, block forward passes are highly dynamic
 around attention). Because of that, this node **does not** compile whole
 `double_blocks.{i}` / `single_blocks.{i}` forwards.
 
-Instead, when `compile_transformer_only = true`, Flux targets leaf tensor-heavy
-submodules. It first tries preferred names and then falls back to inferred leaf
-modules from each block when naming differs across ComfyUI builds.
+Instead, when `compile_transformer_only = true`, Flux targets strict leaf
+submodules by default.
 
-Preferred Flux names attempted first:
+Strict Flux names targeted by default:
 
 - `double_blocks.{i}.img_attn.qkv`
 - `double_blocks.{i}.img_attn.proj`
 - `double_blocks.{i}.txt_attn.qkv`
 - `double_blocks.{i}.txt_attn.proj`
-- `double_blocks.{i}.img_mlp`
-- `double_blocks.{i}.txt_mlp`
 - `single_blocks.{i}.linear1`
 - `single_blocks.{i}.linear2`
 
-Note: MLP containers (`img_mlp`/`txt_mlp`) are often not leaf modules in Flux
-builds, so the node may compile inferred leaf submodules inside those MLP paths
-instead of compiling the container module directly.
+Optional widening controls:
 
-Fallback inference (when preferred names are missing, or when preferred names
-resolve to non-leaf containers) looks for leaf modules matching attention
-`qkv/proj`, `img_mlp/txt_mlp`, and `linear1/linear2` patterns inside Flux
-blocks.
+- `allow_flux_inferred_targets` (`false` by default)
+  - `false`: use only strict names above.
+  - `true`: allow inferred Flux leaf targets (including `img_mlp/txt_mlp`
+    pattern matches) for compatibility across variants.
+
+- `fallback_to_full_model_if_no_targets` (`false` by default)
+  - `false`: if transformer-only target discovery finds nothing, skip compile
+    instead of silently widening scope.
+  - `true`: if discovery finds nothing, fall back to compiling
+    `diffusion_model`.
 
 For non-Flux transformer-style models, it compiles known block containers such
 as:
@@ -84,8 +85,8 @@ as:
 - `visual_transformer_blocks`
 - `text_transformer_blocks`
 
-If no known transformer compile targets are found, the node safely falls back
-to compiling `diffusion_model` as a whole.
+If no known transformer compile targets are found, behavior is controlled by
+`fallback_to_full_model_if_no_targets` (default `false`, meaning skip compile).
 
 ---
 
@@ -131,11 +132,19 @@ to compiling `diffusion_model` as a whole.
 - `compile_transformer_only` (`BOOLEAN`)
   - `false` (default): compile the entire `diffusion_model`.
   - `true`: compile discovered transformer targets only.
-  - Flux behavior: compiles leaf heavy submodules (qkv/proj/mlp/linear) instead
-    of full block forwards to avoid compiling across dynamic hook-heavy paths.
-  - Fallback behavior: if no recognized transformer compile targets are
-    detected, compile
-    `diffusion_model` anyway.
+  - Flux behavior (default strict mode): targets only `qkv/proj` attention
+    leaves plus `linear1/linear2` leaves.
+
+- `allow_flux_inferred_targets` (`BOOLEAN`, default `false`)
+  - `false` (recommended): strict Flux target set only.
+  - `true`: allow inferred Flux leaf targets (`img_mlp/txt_mlp`-style matches)
+    when preferred names differ.
+
+- `fallback_to_full_model_if_no_targets` (`BOOLEAN`, default `false`)
+  - `false` (recommended): if transformer-only discovery finds nothing, skip
+    compile rather than widening scope.
+  - `true`: if transformer-only discovery finds nothing, compile
+    `diffusion_model`.
 
 ---
 
@@ -149,8 +158,11 @@ If you're unsure where to begin:
 - `fullgraph`: `false`
 - `dynamic`: `false`
 - `compile_transformer_only`: `true` for FLUX-style models (including
-  FLUX.2 KLEIN 9B) to target leaf heavy modules; otherwise start with `false`
-  and compare.
+  FLUX.2 KLEIN 9B); otherwise start with `false` and compare.
+- `allow_flux_inferred_targets`: `false` (recommended for debugging and stable
+  targeting).
+- `fallback_to_full_model_if_no_targets`: `false` (recommended to avoid silent
+  whole-model escalation).
 
 Then iterate one setting at a time based on stability and speed.
 

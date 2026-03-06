@@ -125,6 +125,24 @@ class TorchCompileModel_LoRASafe:
                         "SD-style models often compile transformer_blocks/blocks.",
                     },
                 ),
+                "allow_flux_inferred_targets": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "False (recommended) -> Flux compile targets are strict and limited "
+                        "to qkv/proj/linear1/linear2 leaves only. "
+                        "True -> also allow inferred Flux target names for compatibility.",
+                    },
+                ),
+                "fallback_to_full_model_if_no_targets": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "If transformer-only target discovery finds nothing, "
+                        "fall back to compiling diffusion_model. "
+                        "False keeps execution uncompiled instead of widening target scope.",
+                    },
+                ),
             }
         }
 
@@ -172,9 +190,11 @@ class TorchCompileModel_LoRASafe:
         return targets
 
     @classmethod
-    def _discover_flux_double_block_suffixes(cls, block: nn.Module):
+    def _discover_flux_double_block_suffixes(
+        cls, block: nn.Module, allow_inferred_targets: bool = False
+    ):
         preferred = cls._try_preferred_suffixes(block, cls._FLUX_DOUBLE_PREFERRED_SUFFIXES)
-        if preferred:
+        if preferred or not allow_inferred_targets:
             return preferred
 
         inferred = []
@@ -193,9 +213,11 @@ class TorchCompileModel_LoRASafe:
         return list(dict.fromkeys(inferred))
 
     @classmethod
-    def _discover_flux_single_block_suffixes(cls, block: nn.Module):
+    def _discover_flux_single_block_suffixes(
+        cls, block: nn.Module, allow_inferred_targets: bool = False
+    ):
         preferred = cls._try_preferred_suffixes(block, cls._FLUX_SINGLE_PREFERRED_SUFFIXES)
-        if preferred:
+        if preferred or not allow_inferred_targets:
             return preferred
 
         inferred = []
@@ -208,7 +230,7 @@ class TorchCompileModel_LoRASafe:
         return list(dict.fromkeys(inferred))
 
     @classmethod
-    def _discover_compile_keys(cls, diffusion_model):
+    def _discover_compile_keys(cls, diffusion_model, allow_flux_inferred_targets: bool = False):
         keys = []
 
         # Flux special-case: compile only leaf tensor-heavy modules, not full block forward.
@@ -218,12 +240,16 @@ class TorchCompileModel_LoRASafe:
 
             if isinstance(double_blocks, (nn.ModuleList, list, tuple)):
                 for i, block in enumerate(double_blocks):
-                    for suffix in cls._discover_flux_double_block_suffixes(block):
+                    for suffix in cls._discover_flux_double_block_suffixes(
+                        block, allow_inferred_targets=allow_flux_inferred_targets
+                    ):
                         keys.append(f"diffusion_model.double_blocks.{i}.{suffix}")
 
             if isinstance(single_blocks, (nn.ModuleList, list, tuple)):
                 for i, block in enumerate(single_blocks):
-                    for suffix in cls._discover_flux_single_block_suffixes(block):
+                    for suffix in cls._discover_flux_single_block_suffixes(
+                        block, allow_inferred_targets=allow_flux_inferred_targets
+                    ):
                         keys.append(f"diffusion_model.single_blocks.{i}.{suffix}")
 
             if keys:
@@ -267,6 +293,8 @@ class TorchCompileModel_LoRASafe:
         dynamic,
         disable_cudagraphs,
         compile_transformer_only,
+        allow_flux_inferred_targets=False,
+        fallback_to_full_model_if_no_targets=False,
     ):
         self._check_backend(backend)
 
@@ -281,13 +309,22 @@ class TorchCompileModel_LoRASafe:
         )
 
         if compile_transformer_only:
-            compile_keys = self._discover_compile_keys(dm)
+            compile_keys = self._discover_compile_keys(
+                dm, allow_flux_inferred_targets=allow_flux_inferred_targets
+            )
             if not compile_keys:
-                _LOG.warning(
-                    "TorchCompileModel_LoRASafe: no known transformer compile targets found; "
-                    "falling back to whole diffusion model compile."
-                )
-                compile_keys = ["diffusion_model"]
+                if fallback_to_full_model_if_no_targets:
+                    _LOG.warning(
+                        "TorchCompileModel_LoRASafe: no known transformer compile targets found; "
+                        "falling back to whole diffusion model compile."
+                    )
+                    compile_keys = ["diffusion_model"]
+                else:
+                    _LOG.warning(
+                        "TorchCompileModel_LoRASafe: no known transformer compile targets found; "
+                        "skipping compile instead of falling back to whole model."
+                    )
+                    return (m,)
         else:
             compile_keys = ["diffusion_model"]
 

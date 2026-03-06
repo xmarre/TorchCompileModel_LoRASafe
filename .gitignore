@@ -12,3 +12,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 /.idea/
+
+# Visual Studio workspace files
+.vs/

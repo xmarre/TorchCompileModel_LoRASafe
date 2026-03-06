@@ -1,7 +1,7 @@
 [project]
 name        = "TorchCompileModel_LoRASafe"
 description = "LoRA‐Safe TorchCompile node for ComfyUI"
-version     = "0.1.4"
+version     = "0.1.5"
 license     = { file = "LICENSE" }
 dependencies = []
 

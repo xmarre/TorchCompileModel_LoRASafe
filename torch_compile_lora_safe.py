@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 
 import torch
@@ -123,6 +124,22 @@ class TorchCompileModel_LoRASafe:
                         "tooltip": "True -> compile discovered transformer targets only. "
                         "Flux models compile leaf submodules inside double_blocks/single_blocks; "
                         "SD-style models often compile transformer_blocks/blocks.",
+                    },
+                ),
+                "debug_torch_logs": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Enable PyTorch compile/cudagraph debug logs via "
+                        "torch._logging.set_logs (ignored if TORCH_LOGS env var is already set).",
+                    },
+                ),
+                "skip_dynamic_cudagraphs": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "For cudagraph-capable runs, skip cudagraphing functions with "
+                        "dynamic-shape inputs. Recommended for Flux.",
                     },
                 ),
                 "allow_flux_inferred_targets": (
@@ -284,6 +301,32 @@ class TorchCompileModel_LoRASafe:
 
         return compile_kw
 
+    @staticmethod
+    def _configure_torch_logs(debug_torch_logs: bool):
+        if not debug_torch_logs:
+            return
+        # TORCH_LOGS takes precedence over torch._logging.set_logs(...).
+        if os.environ.get("TORCH_LOGS"):
+            _LOG.warning(
+                "TORCH_LOGS is already set; using environment logging instead of "
+                "torch._logging.set_logs."
+            )
+            return
+        try:
+            torch._logging.set_logs(
+                dynamo=logging.INFO,
+                inductor=logging.INFO,
+                cudagraphs=True,
+                cudagraph_static_inputs=True,
+                perf_hints=True,
+                graph_breaks=True,
+                guards=True,
+                recompiles=True,
+                recompiles_verbose=True,
+            )
+        except Exception as e:
+            _LOG.warning(f"Failed to enable torch logging: {e}")
+
     def patch(
         self,
         model,
@@ -293,10 +336,21 @@ class TorchCompileModel_LoRASafe:
         dynamic,
         disable_cudagraphs,
         compile_transformer_only,
+        debug_torch_logs=False,
+        skip_dynamic_cudagraphs=True,
         allow_flux_inferred_targets=False,
         fallback_to_full_model_if_no_targets=False,
     ):
         self._check_backend(backend)
+
+        self._configure_torch_logs(debug_torch_logs)
+
+        # This flag is process-global, so set it on every call to match the
+        # current node input instead of leaking state from earlier runs.
+        if backend in ("inductor", "cudagraphs"):
+            torch._inductor.config.triton.cudagraph_skip_dynamic_graphs = bool(
+                skip_dynamic_cudagraphs
+            )
 
         try:
             m = model.clone(disable_dynamic=True)

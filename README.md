@@ -122,6 +122,8 @@ If no known transformer compile targets are found, behavior is controlled by
 4. Search for **TorchCompileModel_LoRASafe** in:
    **model / optimisation 🛠️**
 
+or search for this node in Comfyui-Manager and install.
+
 ---
 
 ## Node inputs (detailed)

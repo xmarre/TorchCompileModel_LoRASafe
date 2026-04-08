@@ -328,20 +328,36 @@ class TorchCompileModel_LoRASafe:
 
     @staticmethod
     def _build_compile_kwargs(backend, mode, fullgraph, dynamic, disable_cudagraphs):
-        compile_kw = dict(
-            backend=backend,
-            fullgraph=fullgraph,
-            dynamic=dynamic,
-        )
-        if mode != "default":
-            compile_kw["mode"] = mode
+        compile_kw = {
+            "backend": backend,
+            "fullgraph": fullgraph,
+            "dynamic": dynamic,
+        }
 
         options = {}
         if _skip_torch_compile_dict is not None:
             options["guard_filter_fn"] = _skip_torch_compile_dict
         if disable_cudagraphs and backend == "inductor":
             options["triton.cudagraphs"] = False
-        if options:
+
+        # torch.compile rejects calls that specify both `mode` and `options`.
+        # When we need extra backend options as well as a preset mode, expand
+        # the mode preset into concrete backend options and merge them.
+        if mode != "default":
+            if options:
+                list_mode_options = getattr(torch._inductor, "list_mode_options", None)
+                if list_mode_options is None:
+                    raise RuntimeError(
+                        "Selected a non-default torch.compile mode together with backend options, "
+                        "but this PyTorch build does not expose torch._inductor.list_mode_options() "
+                        "to merge them safely."
+                    )
+                merged_options = dict(list_mode_options(mode) or {})
+                merged_options.update(options)
+                compile_kw["options"] = merged_options
+            else:
+                compile_kw["mode"] = mode
+        elif options:
             compile_kw["options"] = options
 
         return compile_kw

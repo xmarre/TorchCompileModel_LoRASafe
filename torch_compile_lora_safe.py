@@ -352,7 +352,7 @@ class TorchCompileModel_LoRASafe:
                         "but this PyTorch build does not expose torch._inductor.list_mode_options() "
                         "to merge them safely."
                     )
-                merged_options = dict(list_mode_options(mode) or {})
+                merged_options = dict(list_mode_options(mode, dynamic) or {})
                 merged_options.update(options)
                 compile_kw["options"] = merged_options
             else:

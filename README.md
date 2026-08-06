@@ -37,6 +37,9 @@ This node is built to avoid that failure mode:
 - **Patched-model CUDA-graph guard**: LoRA/DoRA weight patches automatically keep
   CUDA graphs disabled unless explicitly overridden, preventing persistent graph
   pools from accumulating across resolution changes or model reloads
+- **Patched-weight backup offload**: for LoRA/DoRA models, original destination
+  weights retained only for rollback are stored on CPU by default, avoiding a
+  model-sized VRAM duplicate under ComfyUI's `HIGH_VRAM` policy
 - Backend support:
   - `inductor`
   - `cudagraphs` (CUDA required; generally best on newer GPUs)
@@ -171,6 +174,17 @@ or search for this node in Comfyui-Manager and install.
     each distinct runtime shape, and ComfyUI may replace patched parameter
     storage during model unload/reload.
 
+- `cpu_offload_patched_weight_backups` (`BOOLEAN`, default `true`)
+  - Applies when the incoming model contains LoRA/DoRA weight patches.
+  - ComfyUI keeps every original destination weight so it can restore the base
+    model. Under `--highvram`, those rollback copies normally remain on CUDA.
+  - `true`: stores only those rollback copies on CPU while live patched weights
+    remain on CUDA. This can save roughly the total size of all patched
+    destination matrices.
+  - `false`: preserves ComfyUI's normal backup placement.
+  - This is a VRAM/system-RAM trade: a LoRA that touches most of a large model can
+    require model-sized CPU backup memory, and model unpatching may take longer.
+
 - `compile_transformer_only` (`BOOLEAN`)
   - `false` (default): compile the entire `diffusion_model` for non-Flux
     models.
@@ -216,6 +230,8 @@ If you're unsure where to begin:
 - `fallback_to_full_model_if_no_targets`: `false` (recommended to avoid silent
   whole-model escalation).
 - `allow_patched_model_cudagraphs`: `false`.
+- `cpu_offload_patched_weight_backups`: `true` when using LoRAs/DoRAs with
+  `--highvram`; ensure system RAM has room for the patched destination weights.
 
 Then iterate one setting at a time based on stability and speed.
 
@@ -228,6 +244,10 @@ Then iterate one setting at a time based on stability and speed.
 - CUDA graphs retain shape-specific recordings and private allocation state. For
   LoRA/DoRA models, the default patched-model guard prevents this retained state
   from stacking when image resolution or patched parameter storage changes.
+- LoRA file size does not predict static patching overhead. A small low-rank
+  adapter can touch most matrices in a large diffusion model; ComfyUI retains
+  each full original destination matrix for rollback. The CPU-backup option
+  prevents those originals from duplicating the live model in VRAM.
 - Best backend can differ across GPUs, drivers, and PyTorch versions.
 - If a backend fails, switch to `inductor` first.
 - If you encounter `cudaMallocAsync`/cudagraph issues, keep
@@ -255,7 +275,16 @@ Then iterate one setting at a time based on stability and speed.
 - **Issue:** Unstable behavior with full model compile.
   - Set `compile_transformer_only = true`.
 
-- **Issue:** VRAM grows after changing the starting image or resolution with LoRAs.
+- **Issue:** Enabling one small LoRA immediately adds many GB of VRAM under
+  `--highvram`.
+  - Keep `cpu_offload_patched_weight_backups = true`.
+  - The extra memory is made of full original destination weights retained for
+    rollback, not copies of the LoRA file.
+  - Expect an equivalent increase in system RAM. The log reports when CPU backup
+    routing is active.
+
+- **Issue:** VRAM grows again after changing the starting image or resolution with
+  LoRAs.
   - Keep `allow_patched_model_cudagraphs = false`.
   - The node will continue using Inductor compilation with CUDA graphs disabled.
   - Restart ComfyUI once after updating to release CUDA graph pools retained by

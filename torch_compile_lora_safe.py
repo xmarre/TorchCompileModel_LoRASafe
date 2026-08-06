@@ -23,85 +23,6 @@ except Exception:
     _skip_torch_compile_dict = None
 
 
-_CPU_BACKUP_PATCHER_CLASS_CACHE = {}
-
-
-class _CpuPatchedWeightBackupMixin:
-    """Route rollback copies for patched weights to CPU without changing model residency."""
-
-    def patch_weight_to_device(
-        self,
-        key,
-        device_to=None,
-        inplace_update=False,
-        return_weight=False,
-        force_cast=False,
-    ):
-        patches = getattr(self, "patches", None)
-        backup = getattr(self, "backup", None)
-        offload_device = getattr(self, "offload_device", None)
-        should_route_backup = (
-            isinstance(patches, dict)
-            and key in patches
-            and isinstance(backup, dict)
-            and key not in backup
-            and not return_weight
-            and getattr(offload_device, "type", None) == "cuda"
-        )
-        if not should_route_backup:
-            return super().patch_weight_to_device(
-                key,
-                device_to=device_to,
-                inplace_update=inplace_update,
-                return_weight=return_weight,
-                force_cast=force_cast,
-            )
-
-        # ComfyUI normally stores rollback weights on self.offload_device.
-        # HIGH_VRAM makes that the same CUDA device as the live model, retaining
-        # both the original and patched destination matrices. Override only for
-        # the duration of backup creation, then restore normal residency policy.
-        self.offload_device = torch.device("cpu")
-        try:
-            return super().patch_weight_to_device(
-                key,
-                device_to=device_to,
-                inplace_update=inplace_update,
-                return_weight=return_weight,
-                force_cast=force_cast,
-            )
-        finally:
-            self.offload_device = offload_device
-
-
-def _enable_cpu_patched_weight_backups(model) -> bool:
-    """Install the backup-device shim on one ModelPatcher clone."""
-    model_class = model.__class__
-    if issubclass(model_class, _CpuPatchedWeightBackupMixin):
-        return True
-
-    wrapped_class = _CPU_BACKUP_PATCHER_CLASS_CACHE.get(model_class)
-    if wrapped_class is None:
-        wrapped_class = type(
-            f"LoRASafeCpuBackup_{model_class.__name__}",
-            (_CpuPatchedWeightBackupMixin, model_class),
-            {"__module__": __name__},
-        )
-        _CPU_BACKUP_PATCHER_CLASS_CACHE[model_class] = wrapped_class
-
-    try:
-        model.__class__ = wrapped_class
-    except TypeError as exc:
-        _LOG.warning(
-            "TorchCompileModel_LoRASafe: could not install CPU patched-weight "
-            "backup routing on %s: %s",
-            model_class.__name__,
-            exc,
-        )
-        return False
-    return True
-
-
 class _LazyCompiled(nn.Module):
     """
     Wraps any nn.Module (e.g. a UNet or a single transformer block)
@@ -254,16 +175,6 @@ class TorchCompileModel_LoRASafe:
                         "weight patches such as LoRA or DoRA. False prevents shape- and "
                         "address-specific CUDA graph pools from accumulating VRAM across "
                         "resolution changes or model reloads.",
-                    },
-                ),
-                "cpu_offload_patched_weight_backups": (
-                    "BOOLEAN",
-                    {
-                        "default": True,
-                        "tooltip": "Store original weights retained for LoRA/DoRA rollback "
-                        "on CPU when HIGH_VRAM would otherwise keep both the original and "
-                        "patched destination matrices on CUDA. Trades equivalent system "
-                        "RAM for substantially lower steady-state VRAM.",
                     },
                 ),
             }
@@ -549,9 +460,7 @@ class TorchCompileModel_LoRASafe:
         allow_flux_inferred_targets=False,
         fallback_to_full_model_if_no_targets=False,
         allow_patched_model_cudagraphs=False,
-        cpu_offload_patched_weight_backups=True,
     ):
-        has_weight_patches = self._has_weight_patches(model)
         backend, disable_cudagraphs = self._resolve_patched_model_cudagraph_policy(
             model=model,
             backend=backend,
@@ -586,14 +495,6 @@ class TorchCompileModel_LoRASafe:
             m = model.clone(disable_dynamic=True)
         except TypeError:
             m = model.clone()
-
-        if has_weight_patches and cpu_offload_patched_weight_backups:
-            if _enable_cpu_patched_weight_backups(m):
-                _LOG.info(
-                    "TorchCompileModel_LoRASafe: patched model detected; original "
-                    "destination weights retained for rollback will be stored on CPU. "
-                    "Live patched weights remain on CUDA."
-                )
 
         dm = m.get_model_object("diffusion_model")
 

@@ -34,6 +34,9 @@ This node is built to avoid that failure mode:
 - **ComfyUI-aligned stability behavior**: attempts `model.clone(disable_dynamic=True)`
   and (when available) uses ComfyUI's `guard_filter_fn` to avoid unnecessary
   guards on dynamic `transformer_options` dictionaries
+- **Patched-model CUDA-graph guard**: LoRA/DoRA weight patches automatically keep
+  CUDA graphs disabled unless explicitly overridden, preventing persistent graph
+  pools from accumulating across resolution changes or model reloads
 - Backend support:
   - `inductor`
   - `cudagraphs` (CUDA required; generally best on newer GPUs)
@@ -156,6 +159,18 @@ or search for this node in Comfyui-Manager and install.
     Inductor-based runs.
   - Set to `false` only when you specifically want Inductor cudagraphs.
 
+- `allow_patched_model_cudagraphs` (`BOOLEAN`, default `false`)
+  - Applies whenever the incoming ComfyUI model contains weight patches such as
+    LoRA or DoRA.
+  - `false`: keeps Inductor compilation enabled while forcing CUDA graphs off.
+    If `backend = cudagraphs`, the node safely uses `backend = inductor` with
+    `triton.cudagraphs = false`.
+  - `true`: honors the selected CUDA-graph settings. Use this only for
+    fixed-shape workflows where the extra retained VRAM is acceptable.
+  - This guard is independent of `dynamic`: PyTorch records a CUDA graph for
+    each distinct runtime shape, and ComfyUI may replace patched parameter
+    storage during model unload/reload.
+
 - `compile_transformer_only` (`BOOLEAN`)
   - `false` (default): compile the entire `diffusion_model` for non-Flux
     models.
@@ -200,6 +215,7 @@ If you're unsure where to begin:
   targeting).
 - `fallback_to_full_model_if_no_targets`: `false` (recommended to avoid silent
   whole-model escalation).
+- `allow_patched_model_cudagraphs`: `false`.
 
 Then iterate one setting at a time based on stability and speed.
 
@@ -209,6 +225,9 @@ Then iterate one setting at a time based on stability and speed.
 
 - First generation after graph changes can be slower (compile warm-up).
 - Recompiles can occur when shapes/settings change substantially.
+- CUDA graphs retain shape-specific recordings and private allocation state. For
+  LoRA/DoRA models, the default patched-model guard prevents this retained state
+  from stacking when image resolution or patched parameter storage changes.
 - Best backend can differ across GPUs, drivers, and PyTorch versions.
 - If a backend fails, switch to `inductor` first.
 - If you encounter `cudaMallocAsync`/cudagraph issues, keep
@@ -235,6 +254,12 @@ Then iterate one setting at a time based on stability and speed.
 
 - **Issue:** Unstable behavior with full model compile.
   - Set `compile_transformer_only = true`.
+
+- **Issue:** VRAM grows after changing the starting image or resolution with LoRAs.
+  - Keep `allow_patched_model_cudagraphs = false`.
+  - The node will continue using Inductor compilation with CUDA graphs disabled.
+  - Restart ComfyUI once after updating to release CUDA graph pools retained by
+    the previous process.
 
 - **Issue:** CUDA backend unavailable.
   - Use `inductor`, or verify CUDA-compatible PyTorch/GPU environment.

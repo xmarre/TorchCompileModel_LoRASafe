@@ -167,6 +167,16 @@ class TorchCompileModel_LoRASafe:
                         "False keeps execution uncompiled instead of widening target scope.",
                     },
                 ),
+                "allow_patched_model_cudagraphs": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Allow CUDA graphs when the incoming model contains "
+                        "weight patches such as LoRA or DoRA. False prevents shape- and "
+                        "address-specific CUDA graph pools from accumulating VRAM across "
+                        "resolution changes or model reloads.",
+                    },
+                ),
             }
         }
 
@@ -363,6 +373,54 @@ class TorchCompileModel_LoRASafe:
         return compile_kw
 
     @staticmethod
+    def _has_weight_patches(model) -> bool:
+        patches = getattr(model, "patches", None)
+        if not isinstance(patches, dict):
+            return False
+        return any(bool(entries) for entries in patches.values())
+
+    @classmethod
+    def _resolve_patched_model_cudagraph_policy(
+        cls,
+        model,
+        backend: str,
+        disable_cudagraphs: bool,
+        allow_patched_model_cudagraphs: bool,
+    ):
+        """
+        Keep CUDA graphs away from mutable ModelPatcher weights by default.
+
+        ComfyUI can replace patched Parameter storage when it applies or removes
+        LoRA/DoRA weights. CUDA graphs require fixed tensor addresses and record a
+        separate graph for each input shape, so combining both behaviors can retain
+        multiple private CUDA pools across resolution changes.
+        """
+        disable_cudagraphs = bool(disable_cudagraphs)
+        if allow_patched_model_cudagraphs or not cls._has_weight_patches(model):
+            return backend, disable_cudagraphs
+
+        if backend == "cudagraphs":
+            _LOG.warning(
+                "TorchCompileModel_LoRASafe: patched model detected; using the "
+                "inductor backend with CUDA graphs disabled to prevent persistent "
+                "shape/address-specific CUDA graph pools. Set "
+                "allow_patched_model_cudagraphs=true only for fixed-shape workflows "
+                "that intentionally accept the extra VRAM retention."
+            )
+            return "inductor", True
+
+        if backend == "inductor" and not disable_cudagraphs:
+            _LOG.warning(
+                "TorchCompileModel_LoRASafe: patched model detected; forcing "
+                "triton.cudagraphs=False to prevent persistent shape/address-specific "
+                "CUDA graph pools. Set allow_patched_model_cudagraphs=true only for "
+                "fixed-shape workflows that intentionally accept the extra VRAM retention."
+            )
+            return backend, True
+
+        return backend, disable_cudagraphs
+
+    @staticmethod
     def _configure_torch_logs(debug_torch_logs: bool):
         if not debug_torch_logs:
             return
@@ -401,7 +459,14 @@ class TorchCompileModel_LoRASafe:
         skip_dynamic_cudagraphs=True,
         allow_flux_inferred_targets=False,
         fallback_to_full_model_if_no_targets=False,
+        allow_patched_model_cudagraphs=False,
     ):
+        backend, disable_cudagraphs = self._resolve_patched_model_cudagraph_policy(
+            model=model,
+            backend=backend,
+            disable_cudagraphs=disable_cudagraphs,
+            allow_patched_model_cudagraphs=allow_patched_model_cudagraphs,
+        )
         self._check_backend(backend)
 
         self._configure_torch_logs(debug_torch_logs)
